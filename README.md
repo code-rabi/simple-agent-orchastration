@@ -4,6 +4,63 @@
 
 It keeps machine-level config in `~/.config/sao/config.yaml`, repo-level config in `.simple-agent-orchestration.yaml`, and local task state under `~/.local/state/sao/`.
 
+## Example Config
+
+Machine config at `~/.config/sao/config.yaml`:
+
+```yaml
+runtime:
+  max_concurrent_tasks: 2
+  poll_interval_seconds: 300
+
+agents:
+  default_order:
+    - codex
+    - claude
+  installed:
+    - name: codex
+      type: codex
+      command: [codex]
+      enabled: true
+      max_parallel: 1
+      healthcheck: [which, codex]
+    - name: claude
+      type: claude
+      command: [claude]
+      enabled: true
+      max_parallel: 1
+      healthcheck: [which, claude]
+
+projects:
+  - path: /Users/you/work/my-repo
+    enabled: true
+```
+
+Repo config at `/path/to/repo/.simple-agent-orchestration.yaml`:
+
+```yaml
+version: 1
+
+selection:
+  sources:
+    - type: issue
+      filters:
+        state: open
+        labels: [agent-ready]
+        assignee: unassigned
+
+priority:
+  labels:
+    P0: 100
+    P1: 80
+    P2: 50
+
+routing:
+  preferred_order:
+    - codex
+    - claude
+```
+
 ## Requirements
 
 - `gh` installed and authenticated
