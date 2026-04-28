@@ -20,10 +20,18 @@
 
 ## Install
 
-Install the latest GitHub release for your platform:
+Install the latest GitHub release for your platform.
+
+macOS / Linux / Bash on Windows:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/code-rabi/simple-agent-orchastration/main/install.sh | bash
+```
+
+PowerShell on Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/code-rabi/simple-agent-orchastration/main/install.sh | bash
 ```
 
 By default the installer uses the latest release, installs to `/usr/local/bin` when writable, and otherwise falls back to `~/.local/bin`.
