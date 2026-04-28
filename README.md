@@ -1,19 +1,11 @@
-# sao
+# Simple Agent Orchestration
 
-`sao` is a single Go binary that watches registered GitHub repositories, ranks eligible issues, and dispatches one task at a time through supported agent CLIs.
+`sao` is a CLI that watches GitHub repositories for eligible issues, ranks them, and dispatches work to supported coding agents like Codex and Claude.
 
-## What It Does Today
+It keeps machine-level config in `~/.config/sao/config.yaml`, repo-level config in `.simple-agent-orchestration.yaml`, and local task state under `~/.local/state/sao/`.
 
-- Stores machine-wide config in `~/.config/sao/config.yaml`
-- Stores per-repo config in `.simple-agent-orchestration.yaml`
-- Discovers GitHub issues through `gh`
-- Filters and ranks candidate tasks
-- Dispatches the top task through a supported agent CLI
-- Tracks local task state to avoid redispatching unchanged issues
+## Requirements
 
-## Prerequisites
-
-- Go 1.24+
 - `gh` installed and authenticated
 - `codex` and/or `claude` installed
 - At least one supported agent configured in machine config
@@ -41,7 +33,11 @@ Useful overrides:
 - `SAO_INSTALL_DIR=/custom/bin` to choose the install directory
 - `SAO_VERSION_TAG=main-<commit-sha>` to install a specific release
 
-## Build
+## Build From Source
+
+If you want to build `sao` yourself instead of installing a release:
+
+- Go 1.24+
 
 ```bash
 go build -o sao ./cmd/sao
