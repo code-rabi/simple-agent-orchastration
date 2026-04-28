@@ -1,7 +1,9 @@
 /bin/
 /dist/
 /\.dogfood/
+/\.tmp/
 /\.tools/
+/\.codex/
 /libexec/agentapi
 
 # local machine state during development

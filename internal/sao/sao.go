@@ -12,11 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nitayr/simple-agent-orchastration/internal/agentapi"
+	"github.com/nitayr/simple-agent-orchastration/internal/acpx"
 	"github.com/nitayr/simple-agent-orchastration/internal/config"
 	"github.com/nitayr/simple-agent-orchastration/internal/gh"
 	"github.com/nitayr/simple-agent-orchastration/internal/planner"
-	saoruntime "github.com/nitayr/simple-agent-orchastration/internal/runtime"
 	"github.com/nitayr/simple-agent-orchastration/internal/state"
 )
 
@@ -61,7 +60,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  sao init-machine   Create ~/.config/sao/config.yaml")
 	fmt.Fprintln(w, "  sao init-repo      Create .simple-agent-orchestration.yaml in the current repo")
 	fmt.Fprintln(w, "  sao add-repo PATH  Register a repo in machine config")
-	fmt.Fprintln(w, "  sao validate       Validate configs, git remotes, gh auth, and host prerequisites")
+	fmt.Fprintln(w, "  sao validate       Validate configs, git remotes, gh auth, acpx, and host prerequisites")
 	fmt.Fprintln(w, "  sao agents         Show configured agents")
 	fmt.Fprintln(w, "  sao plan           Show ranked candidate tasks without dispatching")
 }
@@ -208,13 +207,11 @@ func validate(stdout, stderr io.Writer) error {
 		}
 	}
 
-	agentapiPath, err := saoruntime.AgentAPIBinaryPath()
+	acpxCommand, err := acpx.ResolveCommand(context.Background())
 	if err != nil {
-		problems = append(problems, fmt.Sprintf("bundled agentapi path: %v", err))
-	} else if _, err := os.Stat(agentapiPath); err != nil {
-		fmt.Fprintf(stderr, "warn bundled agentapi not found at %s (expected in packaged release)\n", agentapiPath)
+		problems = append(problems, fmt.Sprintf("acpx runtime: %v", err))
 	} else {
-		fmt.Fprintf(stdout, "ok bundled runtime: %s\n", agentapiPath)
+		fmt.Fprintf(stdout, "ok execution runtime: %s\n", strings.Join(acpxCommand, " "))
 	}
 
 	for _, agent := range machineCfg.Agents.Installed {
@@ -386,12 +383,9 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 
 	fmt.Fprintf(stdout, "dispatching %s #%d with %s\n", picked.Repo.Slug, picked.Issue.Number, agent.Name)
 
-	agentapiPath, err := saoruntime.AgentAPIBinaryPath()
+	acpxCommand, err := acpx.ResolveCommand(ctx)
 	if err != nil {
 		return err
-	}
-	if _, err := os.Stat(agentapiPath); err != nil {
-		return fmt.Errorf("bundled agentapi binary not found at %s", agentapiPath)
 	}
 
 	now := time.Now().UTC()
@@ -409,15 +403,8 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 	}
 
 	prompt := buildPrompt(*picked)
-	session, err := agentapi.StartSession(ctx, agentapiPath, picked.ProjectPath, agent)
-	if err != nil {
-		markTaskFailure(store, picked.Issue.URL, picked.Issue.UpdatedAt, err)
-		_ = state.Save(store)
-		return err
-	}
-	defer session.Close()
-
-	response, err := session.SendAndWait(ctx, prompt, 2*time.Hour)
+	runner := acpx.NewRunner(acpxCommand)
+	response, err := runner.Exec(ctx, picked.ProjectPath, acpxAgentName(agent), prompt)
 	if err != nil {
 		markTaskFailure(store, picked.Issue.URL, picked.Issue.UpdatedAt, err)
 		_ = state.Save(store)
@@ -433,15 +420,15 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 		StartedAt:      now,
 		UpdatedAt:      time.Now().UTC(),
 		CompletedAt:    time.Now().UTC(),
-		LastResponse:   response,
+		LastResponse:   response.AssistantText,
 	}
 	if err := state.Save(store); err != nil {
 		return err
 	}
 
-	if response != "" {
+	if response.AssistantText != "" {
 		fmt.Fprintf(stdout, "completed %s #%d\n", picked.Repo.Slug, picked.Issue.Number)
-		fmt.Fprintf(stdout, "agent summary:\n%s\n", response)
+		fmt.Fprintf(stdout, "agent summary:\n%s\n", response.AssistantText)
 	} else {
 		fmt.Fprintf(stdout, "completed %s #%d with no summary returned\n", picked.Repo.Slug, picked.Issue.Number)
 	}
@@ -463,6 +450,19 @@ func chooseAgent(cfg config.MachineConfig, candidate planner.Candidate) (config.
 		return agent, nil
 	}
 	return config.InstalledAgent{}, fmt.Errorf("no enabled agent available for %s #%d", candidate.Repo.Slug, candidate.Issue.Number)
+}
+
+func acpxAgentName(agent config.InstalledAgent) string {
+	switch strings.ToLower(agent.Type) {
+	case "claude", "claudecode", "claude-code":
+		return "claude"
+	case "codex":
+		return "codex"
+	case "gemini":
+		return "gemini"
+	default:
+		return agent.Name
+	}
 }
 
 func buildPrompt(candidate planner.Candidate) string {
