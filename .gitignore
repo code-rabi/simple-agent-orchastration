@@ -1,0 +1,8 @@
+/bin/
+/dist/
+/\.dogfood/
+/\.tools/
+/libexec/agentapi
+
+# local machine state during development
+/.sao/
