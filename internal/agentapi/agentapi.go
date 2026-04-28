@@ -18,7 +18,6 @@ import (
 
 const (
 	DefaultBaseURL = "http://localhost:3284"
-	requestTimeout = 30 * time.Second
 )
 
 type Client struct {
@@ -51,10 +50,8 @@ type messageEnvelope struct {
 
 func NewClient(baseURL string) Client {
 	return Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		HTTPClient: &http.Client{
-			Timeout: requestTimeout,
-		},
+		BaseURL:    strings.TrimRight(baseURL, "/"),
+		HTTPClient: &http.Client{},
 	}
 }
 
@@ -97,7 +94,7 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) SendAndWait(ctx context.Context, prompt string, maxWait time.Duration) (string, error) {
-	if err := s.client.SendMessage(ctx, Message{
+	if err := s.sendMessageWhenReady(ctx, Message{
 		Type:    "user",
 		Content: prompt,
 	}); err != nil {
@@ -156,6 +153,29 @@ func (s *Session) waitUntilReady(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Session) sendMessageWhenReady(ctx context.Context, message Message) error {
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for {
+		err := s.client.SendMessage(ctx, message)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !strings.Contains(err.Error(), "waiting for user input") {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
 		}
 	}
 }

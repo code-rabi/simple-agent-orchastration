@@ -506,6 +506,9 @@ func shouldDispatch(record state.TaskRecord, candidate planner.Candidate) bool {
 	if record.Status == "running" {
 		return false
 	}
+	if record.Status == "failed" {
+		return true
+	}
 	if !record.IssueUpdatedAt.IsZero() && !candidate.Issue.UpdatedAt.After(record.IssueUpdatedAt) {
 		return false
 	}
