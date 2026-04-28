@@ -218,11 +218,11 @@ func validate(stdout, stderr io.Writer) error {
 		if !agent.Enabled || len(agent.Command) == 0 {
 			continue
 		}
-		if _, err := exec.LookPath(agent.Command[0]); err != nil {
-			problems = append(problems, fmt.Sprintf("configured agent missing from PATH: %s", agent.Name))
+		if _, ok := acpxAgentName(agent); !ok {
+			problems = append(problems, fmt.Sprintf("configured agent is not supported by acpx: %s", agent.Name))
 			continue
 		}
-		fmt.Fprintf(stdout, "ok agent: %s\n", agent.Name)
+		fmt.Fprintf(stdout, "ok agent via acpx: %s\n", agent.Name)
 	}
 
 	for _, project := range machineCfg.Projects {
@@ -404,7 +404,11 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 
 	prompt := buildPrompt(*picked)
 	runner := acpx.NewRunner(acpxCommand)
-	response, err := runner.Exec(ctx, picked.ProjectPath, acpxAgentName(agent), prompt)
+	agentName, ok := acpxAgentName(agent)
+	if !ok {
+		return fmt.Errorf("agent %q is not supported by acpx", agent.Name)
+	}
+	response, err := runner.Exec(ctx, picked.ProjectPath, agentName, prompt)
 	if err != nil {
 		markTaskFailure(store, picked.Issue.URL, picked.Issue.UpdatedAt, err)
 		_ = state.Save(store)
@@ -444,7 +448,7 @@ func chooseAgent(cfg config.MachineConfig, candidate planner.Candidate) (config.
 			continue
 		}
 		agent := cfg.Agents.Installed[idx]
-		if _, err := exec.LookPath(agent.Command[0]); err != nil {
+		if _, ok := acpxAgentName(agent); !ok {
 			continue
 		}
 		return agent, nil
@@ -452,17 +456,11 @@ func chooseAgent(cfg config.MachineConfig, candidate planner.Candidate) (config.
 	return config.InstalledAgent{}, fmt.Errorf("no enabled agent available for %s #%d", candidate.Repo.Slug, candidate.Issue.Number)
 }
 
-func acpxAgentName(agent config.InstalledAgent) string {
-	switch strings.ToLower(agent.Type) {
-	case "claude", "claudecode", "claude-code":
-		return "claude"
-	case "codex":
-		return "codex"
-	case "gemini":
-		return "gemini"
-	default:
-		return agent.Name
+func acpxAgentName(agent config.InstalledAgent) (string, bool) {
+	if name, ok := acpx.ResolveAgentName(agent.Type); ok {
+		return name, true
 	}
+	return acpx.ResolveAgentName(agent.Name)
 }
 
 func buildPrompt(candidate planner.Candidate) string {

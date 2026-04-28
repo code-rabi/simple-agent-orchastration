@@ -38,7 +38,7 @@ type sessionUpdateEnvelope struct {
 
 type sessionUpdate struct {
 	SessionUpdate string          `json:"sessionUpdate"`
-	Content       contentBlock    `json:"content"`
+	Content       json.RawMessage `json:"content"`
 	ToolCall      json.RawMessage `json:"toolCall"`
 }
 
@@ -49,6 +49,19 @@ type contentBlock struct {
 
 type promptResult struct {
 	StopReason string `json:"stopReason"`
+}
+
+func ResolveAgentName(name string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude", "claudecode", "claude-code":
+		return "claude", true
+	case "codex":
+		return "codex", true
+	case "gemini":
+		return "gemini", true
+	default:
+		return "", false
+	}
 }
 
 func ResolveCommand(ctx context.Context) ([]string, error) {
@@ -164,8 +177,8 @@ func parseNDJSON(r io.Reader) (Result, error) {
 			if err := json.Unmarshal(msg.Params, &env); err != nil {
 				return Result{}, fmt.Errorf("parse acpx session update: %w", err)
 			}
-			if env.Update.SessionUpdate == "agent_message_chunk" && env.Update.Content.Type == "text" {
-				assistant.WriteString(env.Update.Content.Text)
+			if env.Update.SessionUpdate == "agent_message_chunk" {
+				assistant.WriteString(extractText(env.Update.Content))
 			}
 			continue
 		}
@@ -184,4 +197,75 @@ func parseNDJSON(r io.Reader) (Result, error) {
 
 	result.AssistantText = strings.TrimSpace(assistant.String())
 	return result, nil
+}
+
+func extractText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return ""
+	}
+	return extractTextFromValue(generic)
+}
+
+func extractTextFromValue(value any) string {
+	switch v := value.(type) {
+	case map[string]any:
+		return extractTextFromMap(v)
+	case []any:
+		var parts []string
+		for _, item := range v {
+			if text := extractTextFromValue(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "")
+	case string:
+		return v
+	default:
+		return ""
+	}
+}
+
+func extractTextFromMap(value map[string]any) string {
+	switch asString(value["type"]) {
+	case "text":
+		return asString(value["text"])
+	case "resource_link":
+		for _, key := range []string{"title", "name", "uri"} {
+			if text := asString(value[key]); text != "" {
+				return text
+			}
+		}
+	case "resource":
+		if resource, ok := value["resource"].(map[string]any); ok {
+			if text := asString(resource["text"]); text != "" {
+				return text
+			}
+			return asString(resource["uri"])
+		}
+	}
+
+	for _, key := range []string{"text", "content"} {
+		switch nested := value[key].(type) {
+		case string:
+			if nested != "" {
+				return nested
+			}
+		case map[string]any, []any:
+			if text := extractTextFromValue(nested); text != "" {
+				return text
+			}
+		}
+	}
+
+	return ""
+}
+
+func asString(value any) string {
+	text, _ := value.(string)
+	return text
 }
