@@ -1,0 +1,18 @@
+version: 1
+selection:
+    sources:
+        - type: issue
+          filters:
+            state: open
+            labels:
+                - agent-ready
+            assignee: unassigned
+priority:
+    labels:
+        P0: 100
+        P1: 80
+        P2: 50
+routing:
+  preferred_order:
+    - codex
+    - claude
