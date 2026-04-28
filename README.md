@@ -52,43 +52,43 @@ go build -o sao ./cmd/sao
 1. Create the machine config:
 
 ```bash
-./sao init-machine
+sao init-machine
 ```
 
 2. In a repo you want `sao` to watch, create the repo config:
 
 ```bash
-./sao init-repo
+sao init-repo
 ```
 
 3. Register that repo in the machine config:
 
 ```bash
-./sao add-repo /path/to/repo
+sao add-repo /path/to/repo
 ```
 
 4. Validate the setup:
 
 ```bash
-./sao validate
+sao validate
 ```
 
 5. Preview what would run:
 
 ```bash
-./sao plan
+sao plan
 ```
 
 6. Run one cycle:
 
 ```bash
-./sao once
+sao once
 ```
 
 7. Or run the foreground loop:
 
 ```bash
-./sao
+sao
 ```
 
 ## Default Task Selection
