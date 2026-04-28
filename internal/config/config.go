@@ -86,7 +86,7 @@ func DefaultMachineConfig() MachineConfig {
 			MaxConcurrentTasks: 2,
 		},
 		Agents: MachineAgents{
-			DefaultOrder: []string{"claude", "codex", "gemini"},
+			DefaultOrder: []string{"claude", "codex"},
 			Installed: []InstalledAgent{
 				{
 					Name:        "claude",
@@ -103,14 +103,6 @@ func DefaultMachineConfig() MachineConfig {
 					Enabled:     true,
 					MaxParallel: 1,
 					Healthcheck: []string{"which", "codex"},
-				},
-				{
-					Name:        "gemini",
-					Type:        "gemini",
-					Command:     []string{"gemini"},
-					Enabled:     true,
-					MaxParallel: 1,
-					Healthcheck: []string{"which", "gemini"},
 				},
 			},
 		},

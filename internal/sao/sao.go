@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/nitayr/simple-agent-orchastration/internal/acpx"
@@ -60,7 +59,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  sao init-machine   Create ~/.config/sao/config.yaml")
 	fmt.Fprintln(w, "  sao init-repo      Create .simple-agent-orchestration.yaml in the current repo")
 	fmt.Fprintln(w, "  sao add-repo PATH  Register a repo in machine config")
-	fmt.Fprintln(w, "  sao validate       Validate configs, git remotes, gh auth, acpx, and host prerequisites")
+	fmt.Fprintln(w, "  sao validate       Validate configs, git remotes, gh auth, and agent prerequisites")
 	fmt.Fprintln(w, "  sao agents         Show configured agents")
 	fmt.Fprintln(w, "  sao plan           Show ranked candidate tasks without dispatching")
 }
@@ -207,22 +206,19 @@ func validate(stdout, stderr io.Writer) error {
 		}
 	}
 
-	acpxCommand, err := acpx.ResolveCommand(context.Background())
-	if err != nil {
-		problems = append(problems, fmt.Sprintf("acpx runtime: %v", err))
-	} else {
-		fmt.Fprintf(stdout, "ok execution runtime: %s\n", strings.Join(acpxCommand, " "))
-	}
-
 	for _, agent := range machineCfg.Agents.Installed {
 		if !agent.Enabled || len(agent.Command) == 0 {
 			continue
 		}
-		if _, ok := acpxAgentName(agent); !ok {
-			problems = append(problems, fmt.Sprintf("configured agent is not supported by acpx: %s", agent.Name))
+		if _, err := exec.LookPath(agent.Command[0]); err != nil {
+			problems = append(problems, fmt.Sprintf("configured agent missing from PATH: %s", agent.Name))
 			continue
 		}
-		fmt.Fprintf(stdout, "ok agent via acpx: %s\n", agent.Name)
+		if _, ok := runtimeAgentName(agent); !ok {
+			problems = append(problems, fmt.Sprintf("configured agent is not supported for direct execution: %s", agent.Name))
+			continue
+		}
+		fmt.Fprintf(stdout, "ok agent runtime: %s\n", agent.Name)
 	}
 
 	for _, project := range machineCfg.Projects {
@@ -383,11 +379,6 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 
 	fmt.Fprintf(stdout, "dispatching %s #%d with %s\n", picked.Repo.Slug, picked.Issue.Number, agent.Name)
 
-	acpxCommand, err := acpx.ResolveCommand(ctx)
-	if err != nil {
-		return err
-	}
-
 	now := time.Now().UTC()
 	store.Tasks[picked.Issue.URL] = state.TaskRecord{
 		IssueURL:       picked.Issue.URL,
@@ -403,10 +394,10 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 	}
 
 	prompt := buildPrompt(*picked)
-	runner := acpx.NewRunner(acpxCommand)
-	agentName, ok := acpxAgentName(agent)
+	runner := acpx.NewRunner(agent.Command)
+	agentName, ok := runtimeAgentName(agent)
 	if !ok {
-		return fmt.Errorf("agent %q is not supported by acpx", agent.Name)
+		return fmt.Errorf("agent %q is not supported for direct execution", agent.Name)
 	}
 	response, err := runner.Exec(ctx, picked.ProjectPath, agentName, prompt)
 	if err != nil {
@@ -448,7 +439,10 @@ func chooseAgent(cfg config.MachineConfig, candidate planner.Candidate) (config.
 			continue
 		}
 		agent := cfg.Agents.Installed[idx]
-		if _, ok := acpxAgentName(agent); !ok {
+		if _, err := exec.LookPath(agent.Command[0]); err != nil {
+			continue
+		}
+		if _, ok := runtimeAgentName(agent); !ok {
 			continue
 		}
 		return agent, nil
@@ -456,7 +450,7 @@ func chooseAgent(cfg config.MachineConfig, candidate planner.Candidate) (config.
 	return config.InstalledAgent{}, fmt.Errorf("no enabled agent available for %s #%d", candidate.Repo.Slug, candidate.Issue.Number)
 }
 
-func acpxAgentName(agent config.InstalledAgent) (string, bool) {
+func runtimeAgentName(agent config.InstalledAgent) (string, bool) {
 	if name, ok := acpx.ResolveAgentName(agent.Type); ok {
 		return name, true
 	}
