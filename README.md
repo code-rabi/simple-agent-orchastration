@@ -18,6 +18,21 @@
 - `codex` and/or `claude` installed
 - At least one supported agent configured in machine config
 
+## Install
+
+Install the latest GitHub release for your platform:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/code-rabi/simple-agent-orchastration/main/install.sh | bash
+```
+
+By default the installer uses the latest release, installs to `/usr/local/bin` when writable, and otherwise falls back to `~/.local/bin`.
+
+Useful overrides:
+
+- `SAO_INSTALL_DIR=/custom/bin` to choose the install directory
+- `SAO_VERSION_TAG=main-<commit-sha>` to install a specific release
+
 ## Build
 
 ```bash

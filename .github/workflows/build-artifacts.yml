@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -80,3 +80,43 @@ jobs:
           name: sao-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/sao-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_ext }}
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: main-${{ github.sha }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sao-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update release
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          title="main ${short_sha}"
+          notes=$(cat <<EOF
+          Automated release for \`${GITHUB_SHA}\`.
+
+          Install the latest release:
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | bash
+          \`\`\`
+          EOF
+          )
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" release-assets/* --clobber
+          else
+            gh release create "${RELEASE_TAG}" release-assets/* \
+              --title "${title}" \
+              --notes "${notes}" \
+              --target "${GITHUB_SHA}"
+          fi
