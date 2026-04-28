@@ -1,0 +1,82 @@
+name: Build Artifacts
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive_ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive_ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            archive_ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          bin_name="sao"
+          if [ "${GOOS}" = "windows" ]; then
+            bin_name="sao.exe"
+          fi
+          go build -trimpath -ldflags="-s -w" -o "dist/${bin_name}" ./cmd/sao
+
+      - name: Package tar.gz artifact
+        if: matrix.archive_ext == 'tar.gz'
+        run: |
+          asset_base="sao-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p package
+          cp README.md package/
+          cp dist/sao package/
+          tar -C package -czf "dist/${asset_base}.tar.gz" .
+
+      - name: Package zip artifact
+        if: matrix.archive_ext == 'zip'
+        run: |
+          asset_base="sao-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p package
+          cp README.md package/
+          cp dist/sao.exe package/
+          cd package
+          zip -r "../dist/${asset_base}.zip" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sao-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/sao-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
