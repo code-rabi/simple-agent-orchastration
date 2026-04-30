@@ -28,6 +28,10 @@ type TaskRecord struct {
 	CompletedAt    time.Time `json:"completed_at,omitempty"`
 	LastError      string    `json:"last_error,omitempty"`
 	LastResponse   string    `json:"last_response,omitempty"`
+	Branch         string    `json:"branch,omitempty"`
+	WorktreePath   string    `json:"worktree_path,omitempty"`
+	CommitSHA      string    `json:"commit_sha,omitempty"`
+	PullRequestURL string    `json:"pull_request_url,omitempty"`
 }
 
 func Load() (Store, error) {
