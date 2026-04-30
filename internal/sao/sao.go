@@ -507,12 +507,35 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 		wg.Add(1)
 		go func(plan dispatchPlan) {
 			defer wg.Done()
-			prompt := buildPrompt(plan.Candidate)
+			worktree, err := gh.PrepareTaskWorktree(ctx, plan.Candidate.Repo, plan.Candidate.Issue)
+			if err != nil {
+				outcomes <- dispatchOutcome{
+					Plan:        plan,
+					Err:         fmt.Errorf("prepare task worktree: %w", err),
+					CompletedAt: time.Now().UTC(),
+				}
+				return
+			}
+
+			prompt := buildPrompt(plan.Candidate, worktree.Path)
 			runner := acpx.NewRunner(plan.Agent.Command)
-			response, err := runner.Exec(ctx, plan.Candidate.ProjectPath, plan.RuntimeName, prompt)
+			response, err := runner.Exec(ctx, worktree.Path, plan.RuntimeName, prompt)
+			if err != nil {
+				outcomes <- dispatchOutcome{
+					Plan:        plan,
+					Response:    response,
+					Delivery:    gh.DeliveryForWorktree(worktree),
+					Err:         err,
+					CompletedAt: time.Now().UTC(),
+				}
+				return
+			}
+
+			delivery, err := gh.PublishTaskChanges(ctx, plan.Candidate.Repo, plan.Candidate.Issue, worktree, response.AssistantText)
 			outcomes <- dispatchOutcome{
 				Plan:        plan,
 				Response:    response,
+				Delivery:    delivery,
 				Err:         err,
 				CompletedAt: time.Now().UTC(),
 			}
@@ -526,7 +549,7 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 	var errs []error
 	for outcome := range outcomes {
 		if outcome.Err != nil {
-			markTaskFailure(store, outcome.Plan.Candidate.Issue.URL, outcome.Plan.Candidate.Issue.UpdatedAt, outcome.CompletedAt, outcome.Err)
+			markTaskFailure(store, outcome.Plan.Candidate.Issue.URL, outcome.Plan.Candidate.Issue.UpdatedAt, outcome.CompletedAt, outcome.Err, outcome.Delivery)
 			fmt.Fprintf(
 				stderr,
 				"failed %s #%d with %s: %v\n",
@@ -547,12 +570,21 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 				UpdatedAt:      outcome.CompletedAt,
 				CompletedAt:    outcome.CompletedAt,
 				LastResponse:   outcome.Response.AssistantText,
+				Branch:         outcome.Delivery.Branch,
+				WorktreePath:   outcome.Delivery.WorktreePath,
+				CommitSHA:      outcome.Delivery.CommitSHA,
+				PullRequestURL: outcome.Delivery.PullRequestURL,
 			}
 			if outcome.Response.AssistantText != "" {
 				fmt.Fprintf(stdout, "completed %s #%d\n", outcome.Plan.Candidate.Repo.Slug, outcome.Plan.Candidate.Issue.Number)
 				fmt.Fprintf(stdout, "agent summary:\n%s\n", outcome.Response.AssistantText)
 			} else {
 				fmt.Fprintf(stdout, "completed %s #%d with no summary returned\n", outcome.Plan.Candidate.Repo.Slug, outcome.Plan.Candidate.Issue.Number)
+			}
+			if outcome.Delivery.PullRequestURL != "" {
+				fmt.Fprintf(stdout, "pull request: %s\n", outcome.Delivery.PullRequestURL)
+			} else if outcome.Delivery.Branch != "" && !outcome.Delivery.HasChanges {
+				fmt.Fprintf(stdout, "no changes to publish for %s #%d\n", outcome.Plan.Candidate.Repo.Slug, outcome.Plan.Candidate.Issue.Number)
 			}
 		}
 
@@ -576,6 +608,7 @@ type dispatchPlan struct {
 type dispatchOutcome struct {
 	Plan        dispatchPlan
 	Response    acpx.Result
+	Delivery    gh.DeliveryResult
 	Err         error
 	CompletedAt time.Time
 }
@@ -702,14 +735,15 @@ func runtimeAgentName(agent config.InstalledAgent) (string, bool) {
 	return acpx.ResolveAgentName(agent.Name)
 }
 
-func buildPrompt(candidate planner.Candidate) string {
+func buildPrompt(candidate planner.Candidate, worktreePath string) string {
 	body := strings.TrimSpace(candidate.Issue.Body)
 	if len(body) > 4000 {
 		body = body[:4000] + "\n...[truncated]"
 	}
 
 	return strings.TrimSpace(fmt.Sprintf(`
-You are working inside the repository at: %s
+You are working inside a git worktree at: %s
+Original watched repository path: %s
 
 GitHub issue:
 - Repository: %s
@@ -726,17 +760,24 @@ Please:
 3. run any relevant local validation if available
 4. summarize the changes you made
 
+Do not create a branch, commit, push, or open a pull request. The orchestrator will publish your file changes after you finish.
 Do not ask for orchestration help. Work directly in the repository.
-`, candidate.ProjectPath, candidate.Repo.Slug, candidate.Issue.Number, candidate.Issue.URL, candidate.Issue.Title, body))
+`, worktreePath, candidate.ProjectPath, candidate.Repo.Slug, candidate.Issue.Number, candidate.Issue.URL, candidate.Issue.Title, body))
 }
 
-func markTaskFailure(store state.Store, issueURL string, issueUpdatedAt, completedAt time.Time, err error) {
+func markTaskFailure(store state.Store, issueURL string, issueUpdatedAt, completedAt time.Time, err error, delivery gh.DeliveryResult) {
 	record := store.Tasks[issueURL]
 	record.Status = "failed"
 	record.IssueUpdatedAt = issueUpdatedAt
 	record.UpdatedAt = completedAt
 	record.CompletedAt = completedAt
 	record.LastError = err.Error()
+	if delivery.Branch != "" {
+		record.Branch = delivery.Branch
+	}
+	if delivery.WorktreePath != "" {
+		record.WorktreePath = delivery.WorktreePath
+	}
 	store.Tasks[issueURL] = record
 }
 

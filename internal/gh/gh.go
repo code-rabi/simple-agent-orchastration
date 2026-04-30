@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,20 @@ type Issue struct {
 	UpdatedAt time.Time
 	Labels    []string
 	Assignees []string
+}
+
+type DeliveryResult struct {
+	Branch         string
+	WorktreePath   string
+	CommitSHA      string
+	PullRequestURL string
+	HasChanges     bool
+}
+
+type TaskWorktree struct {
+	Name       string
+	BaseBranch string
+	Path       string
 }
 
 type issueJSON struct {
@@ -130,6 +145,93 @@ func ListIssues(ctx context.Context, repo Repository, repoCfg config.RepoConfig)
 	return all, nil
 }
 
+func PrepareTaskWorktree(ctx context.Context, repo Repository, issue Issue) (TaskWorktree, error) {
+	repoPath := repo.LocalPath
+	baseBranch, err := gitOutput(ctx, repoPath, "branch", "--show-current")
+	if err != nil {
+		return TaskWorktree{}, fmt.Errorf("read current branch: %w", err)
+	}
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return TaskWorktree{}, errors.New("cannot dispatch from detached HEAD")
+	}
+
+	stateDir, err := config.MachineStateDir()
+	if err != nil {
+		return TaskWorktree{}, err
+	}
+
+	suffix := time.Now().UTC().Format("20060102-150405")
+	branch := fmt.Sprintf("sao/issue-%d-%s", issue.Number, suffix)
+	worktreePath := filepath.Join(stateDir, "worktrees", sanitizePathComponent(repo.Slug), fmt.Sprintf("issue-%d-%s", issue.Number, suffix))
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
+		return TaskWorktree{}, fmt.Errorf("create worktree parent: %w", err)
+	}
+
+	if _, err := gitOutput(ctx, repoPath, "worktree", "add", "-b", branch, worktreePath, "HEAD"); err != nil {
+		return TaskWorktree{}, fmt.Errorf("create task worktree %s: %w", worktreePath, err)
+	}
+	return TaskWorktree{Name: branch, BaseBranch: baseBranch, Path: worktreePath}, nil
+}
+
+func PublishTaskChanges(ctx context.Context, repo Repository, issue Issue, worktree TaskWorktree, agentSummary string) (DeliveryResult, error) {
+	clean, err := WorkingTreeClean(ctx, worktree.Path)
+	if err != nil {
+		return DeliveryResult{}, err
+	}
+
+	result := DeliveryResult{
+		Branch:       worktree.Name,
+		WorktreePath: worktree.Path,
+		HasChanges:   !clean,
+	}
+	if clean {
+		return result, nil
+	}
+
+	if _, err := gitOutput(ctx, worktree.Path, "add", "-A"); err != nil {
+		return DeliveryResult{}, fmt.Errorf("stage changes: %w", err)
+	}
+
+	commitTitle := fmt.Sprintf("Fix #%d: %s", issue.Number, issue.Title)
+	commitBody := strings.TrimSpace(fmt.Sprintf("Implemented by sao.\n\nIssue: %s\n\nAgent summary:\n%s", issue.URL, strings.TrimSpace(agentSummary)))
+	if _, err := gitOutput(ctx, worktree.Path, "commit", "-m", commitTitle, "-m", commitBody); err != nil {
+		return DeliveryResult{}, fmt.Errorf("commit task changes: %w", err)
+	}
+
+	commitSHA, err := gitOutput(ctx, worktree.Path, "rev-parse", "--short", "HEAD")
+	if err != nil {
+		return DeliveryResult{}, fmt.Errorf("read commit sha: %w", err)
+	}
+	result.CommitSHA = strings.TrimSpace(commitSHA)
+
+	if _, err := gitOutput(ctx, worktree.Path, "push", "-u", "origin", worktree.Name); err != nil {
+		return DeliveryResult{}, fmt.Errorf("push task branch: %w", err)
+	}
+
+	prURL, err := createDraftPR(ctx, repo, issue, worktree.Name, agentSummary)
+	if err != nil {
+		return DeliveryResult{}, err
+	}
+	result.PullRequestURL = prURL
+	return result, nil
+}
+
+func DeliveryForWorktree(worktree TaskWorktree) DeliveryResult {
+	return DeliveryResult{
+		Branch:       worktree.Name,
+		WorktreePath: worktree.Path,
+	}
+}
+
+func WorkingTreeClean(ctx context.Context, repoPath string) (bool, error) {
+	out, err := gitOutput(ctx, repoPath, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("check working tree: %w", err)
+	}
+	return strings.TrimSpace(out) == "", nil
+}
+
 func gitOutput(ctx context.Context, repoPath string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoPath}, args...)...)
 	var stderr bytes.Buffer
@@ -145,7 +247,56 @@ func gitOutput(ctx context.Context, repoPath string, args ...string) (string, er
 	return string(out), nil
 }
 
+func createDraftPR(ctx context.Context, repo Repository, issue Issue, branch, agentSummary string) (string, error) {
+	title := fmt.Sprintf("Fix #%d: %s", issue.Number, issue.Title)
+	body := strings.TrimSpace(fmt.Sprintf("Closes %s\n\nAgent summary:\n%s", issue.URL, strings.TrimSpace(agentSummary)))
+	if body == "" {
+		body = fmt.Sprintf("Closes %s", issue.URL)
+	}
+	out, err := ghOutput(
+		ctx,
+		repo.LocalPath,
+		"pr", "create",
+		"--repo", repo.Slug,
+		"--draft",
+		"--head", branch,
+		"--title", title,
+		"--body", body,
+	)
+	if err != nil {
+		return "", fmt.Errorf("create draft pull request: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func sanitizePathComponent(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
 func ghJSON(ctx context.Context, repoPath string, args ...string) ([]byte, error) {
+	out, err := ghOutput(ctx, repoPath, args...)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(out), nil
+}
+
+func ghOutput(ctx context.Context, repoPath string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	if repoPath != "" {
 		cmd.Dir = repoPath
@@ -158,9 +309,9 @@ func ghJSON(ctx context.Context, repoPath string, args ...string) ([]byte, error
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, errors.New(msg)
+		return "", errors.New(msg)
 	}
-	return out, nil
+	return string(out), nil
 }
 
 func mapIssue(item issueJSON) (Issue, error) {

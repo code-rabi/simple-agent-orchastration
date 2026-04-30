@@ -132,6 +132,8 @@ sao plan
 sao once
 ```
 
+When a dispatched agent produces file changes, `sao` creates an isolated git worktree under `~/.local/state/sao/worktrees/`, commits the diff on a task branch, pushes it, opens a draft pull request, and prints the PR URL. The PR URL, branch, worktree path, commit SHA, and agent summary are also stored in the local state file under `~/.local/state/sao/`.
+
 6. Or run the foreground loop:
 
 ```bash
@@ -193,4 +195,5 @@ State:
 
 - This is currently an MVP.
 - Agent execution is routed through `acpx`.
+- Completed tasks run in isolated git worktrees and are delivered as draft pull requests when they produce a git diff.
 - Supported agent runtimes today are `codex` and `claude`.
