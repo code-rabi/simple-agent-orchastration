@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nitayr/simple-agent-orchastration/internal/acpx"
@@ -359,76 +360,109 @@ func runCycle(ctx context.Context, cfg config.MachineConfig, stdout, stderr io.W
 		return err
 	}
 
-	var picked *planner.Candidate
-	for _, candidate := range candidates {
-		record, ok := store.Tasks[candidate.Issue.URL]
-		if ok && !shouldDispatch(record, candidate) {
-			continue
-		}
-		picked = &candidate
-		break
+	plans, err := selectDispatchPlans(cfg, candidates, store)
+	if err != nil {
+		return err
 	}
-	if picked == nil {
-		fmt.Fprintln(stdout, "no eligible tasks after state filtering")
+	if len(plans) == 0 {
+		fmt.Fprintln(stdout, "no eligible tasks after state and concurrency filtering")
 		return nil
 	}
 
-	agent, err := chooseAgent(cfg, *picked)
-	if err != nil {
-		return err
-	}
-
-	fmt.Fprintf(stdout, "dispatching %s #%d with %s\n", picked.Repo.Slug, picked.Issue.Number, agent.Name)
-
 	now := time.Now().UTC()
-	store.Tasks[picked.Issue.URL] = state.TaskRecord{
-		IssueURL:       picked.Issue.URL,
-		RepoPath:       picked.ProjectPath,
-		AgentName:      agent.Name,
-		Status:         "running",
-		IssueUpdatedAt: picked.Issue.UpdatedAt,
-		StartedAt:      now,
-		UpdatedAt:      now,
+	for _, plan := range plans {
+		fmt.Fprintf(stdout, "dispatching %s #%d with %s\n", plan.Candidate.Repo.Slug, plan.Candidate.Issue.Number, plan.Agent.Name)
+		store.Tasks[plan.Candidate.Issue.URL] = state.TaskRecord{
+			IssueURL:       plan.Candidate.Issue.URL,
+			RepoPath:       plan.Candidate.ProjectPath,
+			AgentName:      plan.Agent.Name,
+			Status:         "running",
+			IssueUpdatedAt: plan.Candidate.Issue.UpdatedAt,
+			StartedAt:      now,
+			UpdatedAt:      now,
+		}
 	}
 	if err := state.Save(store); err != nil {
 		return err
 	}
 
-	prompt := buildPrompt(*picked)
-	runner := acpx.NewRunner(agent.Command)
-	agentName, ok := runtimeAgentName(agent)
-	if !ok {
-		return fmt.Errorf("agent %q is not supported for direct execution", agent.Name)
+	outcomes := make(chan dispatchOutcome, len(plans))
+	var wg sync.WaitGroup
+	for _, plan := range plans {
+		wg.Add(1)
+		go func(plan dispatchPlan) {
+			defer wg.Done()
+			prompt := buildPrompt(plan.Candidate)
+			runner := acpx.NewRunner(plan.Agent.Command)
+			response, err := runner.Exec(ctx, plan.Candidate.ProjectPath, plan.RuntimeName, prompt)
+			outcomes <- dispatchOutcome{
+				Plan:        plan,
+				Response:    response,
+				Err:         err,
+				CompletedAt: time.Now().UTC(),
+			}
+		}(plan)
 	}
-	response, err := runner.Exec(ctx, picked.ProjectPath, agentName, prompt)
-	if err != nil {
-		markTaskFailure(store, picked.Issue.URL, picked.Issue.UpdatedAt, err)
-		_ = state.Save(store)
-		return err
+	go func() {
+		wg.Wait()
+		close(outcomes)
+	}()
+
+	var errs []error
+	for outcome := range outcomes {
+		if outcome.Err != nil {
+			markTaskFailure(store, outcome.Plan.Candidate.Issue.URL, outcome.Plan.Candidate.Issue.UpdatedAt, outcome.CompletedAt, outcome.Err)
+			fmt.Fprintf(
+				stderr,
+				"failed %s #%d with %s: %v\n",
+				outcome.Plan.Candidate.Repo.Slug,
+				outcome.Plan.Candidate.Issue.Number,
+				outcome.Plan.Agent.Name,
+				outcome.Err,
+			)
+			errs = append(errs, outcome.Err)
+		} else {
+			store.Tasks[outcome.Plan.Candidate.Issue.URL] = state.TaskRecord{
+				IssueURL:       outcome.Plan.Candidate.Issue.URL,
+				RepoPath:       outcome.Plan.Candidate.ProjectPath,
+				AgentName:      outcome.Plan.Agent.Name,
+				Status:         "completed",
+				IssueUpdatedAt: outcome.Plan.Candidate.Issue.UpdatedAt,
+				StartedAt:      now,
+				UpdatedAt:      outcome.CompletedAt,
+				CompletedAt:    outcome.CompletedAt,
+				LastResponse:   outcome.Response.AssistantText,
+			}
+			if outcome.Response.AssistantText != "" {
+				fmt.Fprintf(stdout, "completed %s #%d\n", outcome.Plan.Candidate.Repo.Slug, outcome.Plan.Candidate.Issue.Number)
+				fmt.Fprintf(stdout, "agent summary:\n%s\n", outcome.Response.AssistantText)
+			} else {
+				fmt.Fprintf(stdout, "completed %s #%d with no summary returned\n", outcome.Plan.Candidate.Repo.Slug, outcome.Plan.Candidate.Issue.Number)
+			}
+		}
+
+		if err := state.Save(store); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
-	store.Tasks[picked.Issue.URL] = state.TaskRecord{
-		IssueURL:       picked.Issue.URL,
-		RepoPath:       picked.ProjectPath,
-		AgentName:      agent.Name,
-		Status:         "completed",
-		IssueUpdatedAt: picked.Issue.UpdatedAt,
-		StartedAt:      now,
-		UpdatedAt:      time.Now().UTC(),
-		CompletedAt:    time.Now().UTC(),
-		LastResponse:   response.AssistantText,
-	}
-	if err := state.Save(store); err != nil {
-		return err
-	}
-
-	if response.AssistantText != "" {
-		fmt.Fprintf(stdout, "completed %s #%d\n", picked.Repo.Slug, picked.Issue.Number)
-		fmt.Fprintf(stdout, "agent summary:\n%s\n", response.AssistantText)
-	} else {
-		fmt.Fprintf(stdout, "completed %s #%d with no summary returned\n", picked.Repo.Slug, picked.Issue.Number)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	return nil
+}
+
+type dispatchPlan struct {
+	Candidate   planner.Candidate
+	Agent       config.InstalledAgent
+	RuntimeName string
+}
+
+type dispatchOutcome struct {
+	Plan        dispatchPlan
+	Response    acpx.Result
+	Err         error
+	CompletedAt time.Time
 }
 
 func chooseAgent(cfg config.MachineConfig, candidate planner.Candidate) (config.InstalledAgent, error) {
@@ -449,6 +483,101 @@ func chooseAgent(cfg config.MachineConfig, candidate planner.Candidate) (config.
 		return agent, nil
 	}
 	return config.InstalledAgent{}, fmt.Errorf("no enabled agent available for %s #%d", candidate.Repo.Slug, candidate.Issue.Number)
+}
+
+func selectDispatchPlans(cfg config.MachineConfig, candidates []planner.Candidate, store state.Store) ([]dispatchPlan, error) {
+	globalLimit := max(cfg.Runtime.MaxConcurrentTasks, 1)
+	runningTasks := 0
+	runningByAgent := map[string]int{}
+	activeRepos := map[string]struct{}{}
+	activeIssues := map[string]struct{}{}
+	for issueURL, record := range store.Tasks {
+		if record.Status != "running" {
+			continue
+		}
+		runningTasks++
+		runningByAgent[record.AgentName]++
+		if record.RepoPath != "" {
+			activeRepos[record.RepoPath] = struct{}{}
+		}
+		activeIssues[issueURL] = struct{}{}
+	}
+
+	availableGlobal := globalLimit - runningTasks
+	if availableGlobal <= 0 {
+		return nil, nil
+	}
+
+	var plans []dispatchPlan
+	var unavailableErr error
+	for _, candidate := range candidates {
+		record, ok := store.Tasks[candidate.Issue.URL]
+		if ok && !shouldDispatch(record, candidate) {
+			continue
+		}
+		if _, ok := activeIssues[candidate.Issue.URL]; ok {
+			continue
+		}
+		if _, ok := activeRepos[candidate.ProjectPath]; ok {
+			continue
+		}
+
+		plan, err := chooseAvailableAgent(cfg, candidate, runningByAgent)
+		if err != nil {
+			if unavailableErr == nil {
+				unavailableErr = err
+			}
+			continue
+		}
+
+		plans = append(plans, plan)
+		runningByAgent[plan.Agent.Name]++
+		activeRepos[candidate.ProjectPath] = struct{}{}
+		activeIssues[candidate.Issue.URL] = struct{}{}
+		if len(plans) >= availableGlobal {
+			break
+		}
+	}
+
+	if len(plans) == 0 {
+		return nil, unavailableErr
+	}
+	return plans, nil
+}
+
+func chooseAvailableAgent(cfg config.MachineConfig, candidate planner.Candidate, runningByAgent map[string]int) (dispatchPlan, error) {
+	for _, name := range candidate.AgentOrder {
+		idx := slices.IndexFunc(cfg.Agents.Installed, func(agent config.InstalledAgent) bool {
+			return agent.Name == name && agent.Enabled
+		})
+		if idx < 0 {
+			continue
+		}
+		agent := cfg.Agents.Installed[idx]
+		if _, err := exec.LookPath(agent.Command[0]); err != nil {
+			continue
+		}
+		runtimeName, ok := runtimeAgentName(agent)
+		if !ok {
+			continue
+		}
+		if runningByAgent[agent.Name] >= effectiveMaxParallel(agent) {
+			continue
+		}
+		return dispatchPlan{
+			Candidate:   candidate,
+			Agent:       agent,
+			RuntimeName: runtimeName,
+		}, nil
+	}
+	return dispatchPlan{}, fmt.Errorf("no enabled agent slot available for %s #%d", candidate.Repo.Slug, candidate.Issue.Number)
+}
+
+func effectiveMaxParallel(agent config.InstalledAgent) int {
+	if agent.MaxParallel <= 0 {
+		return 1
+	}
+	return agent.MaxParallel
 }
 
 func runtimeAgentName(agent config.InstalledAgent) (string, bool) {
@@ -486,11 +615,12 @@ Do not ask for orchestration help. Work directly in the repository.
 `, candidate.ProjectPath, candidate.Repo.Slug, candidate.Issue.Number, candidate.Issue.URL, candidate.Issue.Title, body))
 }
 
-func markTaskFailure(store state.Store, issueURL string, issueUpdatedAt time.Time, err error) {
+func markTaskFailure(store state.Store, issueURL string, issueUpdatedAt, completedAt time.Time, err error) {
 	record := store.Tasks[issueURL]
 	record.Status = "failed"
 	record.IssueUpdatedAt = issueUpdatedAt
-	record.UpdatedAt = time.Now().UTC()
+	record.UpdatedAt = completedAt
+	record.CompletedAt = completedAt
 	record.LastError = err.Error()
 	store.Tasks[issueURL] = record
 }
@@ -506,4 +636,11 @@ func shouldDispatch(record state.TaskRecord, candidate planner.Candidate) bool {
 		return false
 	}
 	return true
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
