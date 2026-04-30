@@ -108,40 +108,44 @@ go build -o sao ./cmd/sao
 sao init-machine
 ```
 
-2. In a repo you want `sao` to watch, create the repo config:
+2. In a repo you want `sao` to watch, create the repo config and register the repo in the machine config:
 
 ```bash
-sao init-repo
+sao init-project
 ```
 
-3. Register that repo in the machine config:
-
-```bash
-sao add-repo /path/to/repo
-```
-
-4. Validate the setup:
+3. Validate the setup:
 
 ```bash
 sao validate
 ```
 
-5. Preview what would run:
+4. Preview what would run:
 
 ```bash
 sao plan
 ```
 
-6. Run one cycle:
+5. Run one cycle:
 
 ```bash
 sao once
 ```
 
-7. Or run the foreground loop:
+6. Or run the foreground loop:
 
 ```bash
 sao
+```
+
+You can still run the setup steps separately with `sao init-repo` and `sao add-repo /path/to/repo` when needed.
+
+## Update
+
+Update an installed binary to the latest GitHub release:
+
+```bash
+sao update
 ```
 
 ## Default Task Selection
@@ -175,8 +179,10 @@ State:
 ## Supported Commands
 
 - `sao init-machine`
+- `sao init-project`
 - `sao init-repo`
 - `sao add-repo /path/to/repo`
+- `sao update`
 - `sao validate`
 - `sao agents`
 - `sao plan`

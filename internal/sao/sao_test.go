@@ -1,6 +1,12 @@
 package sao
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,6 +15,62 @@ import (
 	"github.com/nitayr/simple-agent-orchastration/internal/planner"
 	"github.com/nitayr/simple-agent-orchastration/internal/state"
 )
+
+func TestInitProjectCreatesRepoConfigAndRegistersProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.Mkdir(repoDir, 0o755); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = repoDir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init error = %v\n%s", err, output)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("HOME", tmpDir)
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatalf("Chdir() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"init-project"}, &stdout, io.Discard); err != nil {
+		t.Fatalf("Run(init-project) error = %v", err)
+	}
+
+	if _, err := os.Stat(config.RepoConfigPath(repoDir)); err != nil {
+		t.Fatalf("repo config was not created: %v", err)
+	}
+
+	machinePath, err := config.MachineConfigPath()
+	if err != nil {
+		t.Fatalf("MachineConfigPath() error = %v", err)
+	}
+	cfg, err := config.LoadMachineConfig(machinePath)
+	if err != nil {
+		t.Fatalf("LoadMachineConfig() error = %v", err)
+	}
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("len(cfg.Projects) = %d, want 1", len(cfg.Projects))
+	}
+	if cfg.Projects[0].Path != repoDir {
+		t.Fatalf("cfg.Projects[0].Path = %q, want %q", cfg.Projects[0].Path, repoDir)
+	}
+	if !cfg.Projects[0].Enabled {
+		t.Fatal("cfg.Projects[0].Enabled = false, want true")
+	}
+}
 
 func TestSelectDispatchPlansHonorsLimits(t *testing.T) {
 	t.Parallel()
