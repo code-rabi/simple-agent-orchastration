@@ -1,6 +1,6 @@
 # Simple Agent Orchestration
 
-`sao` is a CLI that watches GitHub repositories for eligible issues, ranks them, and dispatches work to supported coding agents like Codex and Claude.
+`sao` is a CLI that watches GitHub repositories for eligible issues, ranks them, and dispatches work to supported coding agents like Codex and Claude through `acpx`.
 
 It keeps machine-level config in `~/.config/sao/config.yaml`, repo-level config in `.simple-agent-orchestration.yaml`, and local task state under `~/.local/state/sao/`.
 
@@ -186,5 +186,5 @@ State:
 ## Notes
 
 - This is currently an MVP.
-- Dispatch is single-task oriented even though the machine config includes concurrency fields.
-- Direct execution is currently implemented for `claude` and `codex`.
+- Agent execution is routed through `acpx`.
+- Supported agent runtimes today are `codex` and `claude`.
