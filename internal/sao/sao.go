@@ -34,10 +34,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runOnce(ctx, stdout, stderr)
 	case "init-machine":
 		return initMachine(stdout)
+	case "init-project":
+		return initProject(stdout)
 	case "init-repo":
 		return initRepo(stdout)
 	case "add-repo":
 		return addRepo(args, stdout)
+	case "update":
+		return update(ctx, stdout, stderr)
 	case "validate":
 		return validate(stdout, stderr)
 	case "agents":
@@ -59,8 +63,10 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  sao                Run the foreground orchestration loop")
 	fmt.Fprintln(w, "  sao once           Run a single orchestration cycle")
 	fmt.Fprintln(w, "  sao init-machine   Create ~/.config/sao/config.yaml")
+	fmt.Fprintln(w, "  sao init-project   Create repo config and register current repo")
 	fmt.Fprintln(w, "  sao init-repo      Create .simple-agent-orchestration.yaml in the current repo")
 	fmt.Fprintln(w, "  sao add-repo PATH  Register a repo in machine config")
+	fmt.Fprintln(w, "  sao update         Install the latest released sao binary")
 	fmt.Fprintln(w, "  sao validate       Validate configs, git remotes, gh auth, and agent prerequisites")
 	fmt.Fprintln(w, "  sao agents         Show configured agents")
 	fmt.Fprintln(w, "  sao plan           Show ranked candidate tasks without dispatching")
@@ -142,19 +148,62 @@ func initRepo(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	created, err := ensureRepoConfig(repoRoot)
+	if err != nil {
+		return err
+	}
+	if created {
+		fmt.Fprintf(stdout, "created repo config: %s\n", config.RepoConfigPath(repoRoot))
+	} else {
+		fmt.Fprintf(stdout, "repo config already exists: %s\n", config.RepoConfigPath(repoRoot))
+	}
+	return nil
+}
+
+func initProject(stdout io.Writer) error {
+	repoRoot, err := resolveRepoRoot(".")
+	if err != nil {
+		return err
+	}
+
+	createdRepoConfig, err := ensureRepoConfig(repoRoot)
+	if err != nil {
+		return err
+	}
+	if createdRepoConfig {
+		fmt.Fprintf(stdout, "created repo config: %s\n", config.RepoConfigPath(repoRoot))
+	} else {
+		fmt.Fprintf(stdout, "repo config already exists: %s\n", config.RepoConfigPath(repoRoot))
+	}
+
+	machinePath, err := config.MachineConfigPath()
+	if err != nil {
+		return err
+	}
+	cfg, err := ensureMachineConfig(machinePath)
+	if err != nil {
+		return err
+	}
+	cfg = config.AddProject(cfg, repoRoot)
+	if err := config.SaveMachineConfig(machinePath, cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "registered repo: %s\n", repoRoot)
+	return nil
+}
+
+func ensureRepoConfig(repoRoot string) (bool, error) {
 	path := config.RepoConfigPath(repoRoot)
 	if _, err := os.Stat(path); err == nil {
-		fmt.Fprintf(stdout, "repo config already exists: %s\n", path)
-		return nil
+		return false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return false, err
 	}
 	cfg := config.DefaultRepoConfig()
 	if err := config.SaveRepoConfig(path, cfg); err != nil {
-		return err
+		return false, err
 	}
-	fmt.Fprintf(stdout, "created repo config: %s\n", path)
-	return nil
+	return true, nil
 }
 
 func addRepo(args []string, stdout io.Writer) error {
@@ -178,6 +227,37 @@ func addRepo(args []string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "registered repo: %s\n", repoRoot)
+	return nil
+}
+
+func update(ctx context.Context, stdout, stderr io.Writer) error {
+	if _, err := exec.LookPath("bash"); err != nil {
+		return errors.New("required CLI missing: bash")
+	}
+	if _, err := exec.LookPath("curl"); err != nil {
+		return errors.New("required CLI missing: curl")
+	}
+
+	repo := os.Getenv("SAO_REPO")
+	if repo == "" {
+		repo = "code-rabi/simple-agent-orchastration"
+	}
+	installerURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/install.sh", repo)
+
+	cmd := exec.CommandContext(ctx, "bash", "-c", `set -euo pipefail; curl -fsSL "$SAO_INSTALL_URL" | bash`)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = append(os.Environ(), "SAO_INSTALL_URL="+installerURL)
+	if os.Getenv("SAO_INSTALL_DIR") == "" {
+		if installDir, ok := currentInstallDir(); ok {
+			cmd.Env = append(cmd.Env, "SAO_INSTALL_DIR="+installDir)
+		}
+	}
+
+	fmt.Fprintf(stdout, "updating sao from %s\n", installerURL)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("update failed: %w", err)
+	}
 	return nil
 }
 
@@ -334,6 +414,41 @@ func loadMachineConfig() (config.MachineConfig, error) {
 		return config.MachineConfig{}, err
 	}
 	return config.LoadMachineConfig(machinePath)
+}
+
+func currentInstallDir() (string, bool) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", false
+	}
+	switch filepath.Base(executable) {
+	case "sao", "sao.exe":
+	default:
+		return "", false
+	}
+
+	dir := filepath.Dir(executable)
+	if !dirIsWritable(dir) {
+		return "", false
+	}
+	return dir, true
+}
+
+func dirIsWritable(dir string) bool {
+	file, err := os.CreateTemp(dir, ".sao-write-test-*")
+	if err != nil {
+		return false
+	}
+	name := file.Name()
+	if closeErr := file.Close(); closeErr != nil {
+		_ = os.Remove(name)
+		return false
+	}
+	return os.Remove(name) == nil
 }
 
 func effectivePollInterval(cfg config.MachineConfig) time.Duration {
